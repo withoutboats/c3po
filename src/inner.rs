@@ -86,7 +86,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
         if this.config.max_live_time.map_or(false, |max| conn.live_since.elapsed() <= max) {
             this.conns.borrow_mut().decrement();
             // Create a new connection if we've fallen below the minimum count
-            if this.conns.borrow().idle() < this.config.min_connections {
+            if this.conns.borrow().total() < this.config.min_connections {
                 this.replenish_connection(this.clone());
             }
         } else {
@@ -100,7 +100,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
             }
             // If there are no waiting requests & we aren't over the max idle
             // connections limit, attempt to store it back in the pool
-            if this.config.max_idle_connections.map_or(false, |max| max == this.conns.borrow().idle()) {
+            if this.config.max_idle_connections.map_or(false, |max| max <= this.conns.borrow().idle()) {
                 this.conns.borrow_mut().store(conn);
             }
         }
