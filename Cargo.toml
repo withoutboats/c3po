@@ -1,0 +1,9 @@
+[package]
+authors = ["Without Boats <woboats@gmail.com>"]
+name = "c3po"
+version = "0.1.0"
+
+[dependencies]
+futures = "0.1.13"
+tokio-core = "0.1.6"
+tokio-proto = "0.1.1"
