@@ -49,8 +49,10 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
 
     /// Create a new connection and store it in the pool.
     pub fn replenish_connection(&self, pool: Rc<Self>) {
-        let spawn = self.new_connection().map_err(|_| ())
-                        .map(move |conn| InnerPool::store(&pool, Conn::new(conn)));
+        let spawn = self.new_connection().map_err(|_| ()).map(move |conn| {
+            pool.increment();
+            InnerPool::store(&pool, Conn::new(conn))
+        });
         self.handle.spawn(spawn);
     }
 
@@ -104,8 +106,8 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
         }
     }
 
-    /// Increment the connection count without storing anything.
-    pub fn increment_no_store(&self) {
+    /// Increment the connection count.
+    pub fn increment(&self) {
         self.conns.borrow_mut().increment();
     }
 

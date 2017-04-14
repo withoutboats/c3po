@@ -31,7 +31,7 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 /// when it is dropped.
 pub struct PooledConn<T: BindClient<K, TcpStream>, K: 'static> {
     conn: Option<Conn<T::BindClient>>,
-    pool: Pool<T, K>,
+    pool: Rc<InnerPool<T, K>>,
 }
 impl<T: BindClient<K, TcpStream>, K: 'static> Deref for PooledConn<T, K> {
     type Target = T::BindClient;
@@ -49,7 +49,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> DerefMut for PooledConn<T, K> {
 impl<T: BindClient<K, TcpStream>, K: 'static> Drop for PooledConn<T, K> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
-        InnerPool::store(&self.pool.inner, conn)
+        InnerPool::store(&self.pool, conn)
     }
 }
 
@@ -146,7 +146,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
         if let Some(conn) = self.inner.get_connection() {
             return future::Either::A(future::ok(PooledConn {
                 conn: Some(conn),
-                pool: self.clone(),
+                pool: self.inner.clone(),
             }))
         }
         
@@ -176,7 +176,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
 
                 // Prepare the future which will wait for a free connection (may or may not
                 // have a timeout)
-                let pool = self.clone();
+                let pool = self.inner.clone();
                 if let Some(Ok(timeout)) = self.inner.connection_timeout() {
 
                     let timeout = timeout.then(|_| future::err(ConnectError));
@@ -204,9 +204,9 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
         // connections.
         //
         // If we haven't maxed out the pool just create a new connection
-        let pool = self.clone();
+        let pool = self.inner.clone();
         future::Either::B(Box::new(self.inner.new_connection().map(|conn| {
-            pool.inner.increment_no_store();
+            pool.increment();
             PooledConn {
                 conn: Some(Conn::new(conn)),
                 pool: pool,
