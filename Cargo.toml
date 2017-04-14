@@ -1,6 +1,8 @@
 [package]
 authors = ["Without Boats <woboats@gmail.com>"]
 name = "c3po"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/withoutboats/c3po"
 version = "0.1.0"
 
 [dependencies]
