@@ -1,36 +1,33 @@
 use std::collections::VecDeque;
 use std::cell::RefCell;
 use std::io;
-use std::net::SocketAddr;
 use std::rc::Rc;
 
 use futures::{Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::{Handle, Timeout, Interval};
-use core::net::TcpStream;
-use proto::{TcpClient, BindClient, Connect};
+
+use new_service::NewService;
 
 use config::Config;
 use connections::{ConnQueue, Conn};
 
-pub struct InnerPool<T: BindClient<K, TcpStream>, K: 'static> {
-    conns: RefCell<ConnQueue<T::BindClient>>,
-    waiting: RefCell<VecDeque<oneshot::Sender<Conn<T::BindClient>>>>,
+pub struct InnerPool<N: NewService<Handle>> {
+    conns: RefCell<ConnQueue<N::Instance>>,
+    waiting: RefCell<VecDeque<oneshot::Sender<Conn<N::Instance>>>>,
     handle: Handle,
+    client: N,
     config: Config,
-    client: TcpClient<K, T>,
-    addr: SocketAddr,
 }
 
-impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
-    pub fn new(conns: ConnQueue<T::BindClient>, handle: Handle, config: Config, client: TcpClient<K, T>, addr: SocketAddr) -> InnerPool<T, K> {
+impl<N: NewService<Handle> + 'static> InnerPool<N> where N::Future: 'static {
+    pub fn new(conns: ConnQueue<N::Instance>, handle: Handle, client: N, config: Config) -> InnerPool<N> {
         InnerPool {
             conns: RefCell::new(conns),
             waiting: RefCell::new(VecDeque::new()),
             handle: handle,
-            config: config,
             client: client,
-            addr: addr,
+            config: config,
         }
     }
 
@@ -57,17 +54,17 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
     }
 
     /// Get a connection from the pool.
-    pub fn get_connection(&self) -> Option<Conn<T::BindClient>> {
+    pub fn get_connection(&self) -> Option<Conn<N::Instance>> {
         self.conns.borrow_mut().get()
     }
 
     /// Create and return a new connection.
-    pub fn new_connection(&self) -> Connect<K, T> {
-        self.client.connect(&self.addr, &self.handle)
+    pub fn new_connection(&self) -> N::Future {
+        self.client.new_service(&self.handle)
     }
 
     /// Prepare to notify this sender of an available connection.
-    pub fn notify_of_connection(&self, tx: oneshot::Sender<Conn<T::BindClient>>) {
+    pub fn notify_of_connection(&self, tx: oneshot::Sender<Conn<N::Instance>>) {
         self.waiting.borrow_mut().push_back(tx);
     }
 
@@ -81,7 +78,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> InnerPool<T, K> {
     /// * The connection will be released, if it should be released.
     /// * The connection will be passed to a waiting future, if any exist.
     /// * The connection will be put back into the connection pool.
-    pub fn store(this: &Rc<Self>, conn: Conn<T::BindClient>) {
+    pub fn store(this: &Rc<Self>, conn: Conn<N::Instance>) {
         // If this connection has been alive too long, release it
         if this.config.max_live_time.map_or(false, |max| conn.live_since.elapsed() <= max) {
             this.conns.borrow_mut().decrement();

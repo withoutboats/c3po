@@ -1,26 +1,27 @@
 extern crate futures;
 extern crate tokio_core as core;
 extern crate tokio_proto as proto;
+extern crate tokio_service as service;
 
 mod config;
 mod connections;
 mod inner;
 
+pub mod new_service;
+
 use std::io;
 use std::iter;
-use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
-use core::net::TcpStream;
-use proto::{TcpClient, BindClient, Connect};
 
 pub use config::Config;
 
 use connections::{ConnQueue, Conn};
+use new_service::NewService;
 use inner::InnerPool;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
@@ -29,24 +30,24 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
-pub struct PooledConn<T: BindClient<K, TcpStream>, K: 'static> {
-    conn: Option<Conn<T::BindClient>>,
-    pool: Rc<InnerPool<T, K>>,
+pub struct PooledConn<N: NewService<Handle> + 'static> {
+    conn: Option<Conn<N::Instance>>,
+    pool: Rc<InnerPool<N>>,
 }
-impl<T: BindClient<K, TcpStream>, K: 'static> Deref for PooledConn<T, K> {
-    type Target = T::BindClient;
+impl<N: NewService<Handle> + 'static> Deref for PooledConn<N> {
+    type Target = N::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<T: BindClient<K, TcpStream>, K: 'static> DerefMut for PooledConn<T, K> {
+impl<N: NewService<Handle> + 'static> DerefMut for PooledConn<N> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<T: BindClient<K, TcpStream>, K: 'static> Drop for PooledConn<T, K> {
+impl<N: NewService<Handle> + 'static> Drop for PooledConn<N> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         InnerPool::store(&self.pool, conn)
@@ -63,41 +64,39 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Drop for PooledConn<T, K> {
 /// The first type parameter is the protocol for the clients produced by this pool.
 /// The second parameter is the Kind type, usually found in tokio_proto, which is
 /// used to distinguish pipelined and mutiplexed connections.
-pub struct Pool<T: BindClient<K, TcpStream>, K: 'static> {
-    inner: Rc<InnerPool<T, K>>,
+pub struct Pool<N: NewService<Handle>> {
+    inner: Rc<InnerPool<N>>,
 }
 
-impl<T: BindClient<K, TcpStream>, K: 'static> Clone for Pool<T, K> {
-    fn clone(&self) -> Pool<T, K> {
+impl<N: NewService<Handle>> Clone for Pool<N> {
+    fn clone(&self) -> Pool<N> {
         Pool { inner: self.inner.clone() }
     }
 }
 
-impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
+impl<N: NewService<Handle> + 'static> Pool<N> {
     /// Construct a new pool. This returns a future, because it will attempt to
     /// establish the minimum number of connections immediately.
     ///
     /// This takes an address and a protocol for establishing connections, a
     /// handle to an event loop to run those connections on, and a configuration
     /// object to control its policy.
-    pub fn new(addr: SocketAddr, proto: T, handle: Handle, config: Config)
-        -> Box<Future<Item = Pool<T, K>, Error = io::Error>>
+    pub fn new(client: N, handle: Handle, config: Config)
+        -> Box<Future<Item = Pool<N>, Error = io::Error>>
     {
         // The connector type will be used for setting up the initial connections
-        struct Connector<T, K> {
-            client: TcpClient<K, T>,
+        struct Connector<N> {
+            client: N,
             handle: Handle,
-            addr: SocketAddr,
         }
 
         // The connect function
-        fn connect<T: BindClient<K, TcpStream>, K>(c: &Connector<T, K>) -> Connect<K, T> {
-            c.client.connect(&c.addr, &c.handle)
+        fn connect<N: NewService<Handle>>(c: &Connector<N>) -> N::Future {
+            c.client.new_service(&c.handle)
         }
 
         let connector = Connector {
-            addr: addr,
-            client: TcpClient::new(proto),
+            client: client,
             handle: handle,
         };
 
@@ -116,7 +115,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
         // Set up the pool once the connections are established
         Box::new(conns.and_then(move |conns| {
             let Connector { client, handle, .. } = connector;
-            let pool = Rc::new(InnerPool::new(conns, handle, config, client, addr));
+            let pool = Rc::new(InnerPool::new(conns, handle, client, config));
 
             // Prepare a repear task to run (if configured to reap)
             InnerPool::prepare_reaper(&pool)?;
@@ -141,7 +140,7 @@ impl<T: BindClient<K, TcpStream>, K: 'static> Pool<T, K> {
     /// During storage, the connection may be released according to your configuration.
     /// Otherwise, it will prioritize giving the connection to a waiting request and only
     /// if there are none return it to the queue inside the pool.
-    pub fn connection(&self) -> ConnFuture<PooledConn<T, K>, io::Error> {
+    pub fn connection(&self) -> ConnFuture<PooledConn<N>, io::Error> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
             return future::Either::A(future::ok(PooledConn {
