@@ -6,8 +6,7 @@ use std::rc::Rc;
 use futures::{Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::{Handle, Timeout, Interval};
-
-use new_service::NewService;
+use service::NewService;
 
 use config::Config;
 use connections::{ConnQueue, Conn};

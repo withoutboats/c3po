@@ -7,7 +7,7 @@ mod config;
 mod connections;
 mod inner;
 
-pub mod new_service;
+mod bound_tcp_client;
 
 use std::io;
 use std::iter;
@@ -17,11 +17,12 @@ use std::rc::Rc;
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
+use service::NewService;
 
 pub use config::Config;
+pub use bound_tcp_client::BoundTcpClient;
 
 use connections::{ConnQueue, Conn};
-use new_service::NewService;
 use inner::InnerPool;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
