@@ -17,7 +17,7 @@ use std::rc::Rc;
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
-use service::NewService;
+use service::call::Connect;
 
 pub use config::Config;
 pub use bound_tcp_client::BoundTcpClient;
@@ -31,24 +31,24 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
-pub struct PooledConn<N: NewService<Handle> + 'static> {
-    conn: Option<Conn<N::Instance>>,
-    pool: Rc<InnerPool<N>>,
+pub struct PooledConn<K: 'static, C: Connect<K, Handle> + 'static> {
+    conn: Option<Conn<C::Instance>>,
+    pool: Rc<InnerPool<K, C>>,
 }
-impl<N: NewService<Handle> + 'static> Deref for PooledConn<N> {
-    type Target = N::Instance;
+impl<K: 'static, C: Connect<K, Handle> + 'static> Deref for PooledConn<K, C> {
+    type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<N: NewService<Handle> + 'static> DerefMut for PooledConn<N> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> DerefMut for PooledConn<K, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<N: NewService<Handle> + 'static> Drop for PooledConn<N> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> Drop for PooledConn<K, C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         InnerPool::store(&self.pool, conn)
@@ -65,35 +65,35 @@ impl<N: NewService<Handle> + 'static> Drop for PooledConn<N> {
 /// The first type parameter is the protocol for the clients produced by this pool.
 /// The second parameter is the Kind type, usually found in tokio_proto, which is
 /// used to distinguish pipelined and mutiplexed connections.
-pub struct Pool<N: NewService<Handle>> {
-    inner: Rc<InnerPool<N>>,
+pub struct Pool<K: 'static, C: Connect<K, Handle>> {
+    inner: Rc<InnerPool<K, C>>,
 }
 
-impl<N: NewService<Handle>> Clone for Pool<N> {
-    fn clone(&self) -> Pool<N> {
+impl<K: 'static, C: Connect<K, Handle>> Clone for Pool<K, C> {
+    fn clone(&self) -> Self {
         Pool { inner: self.inner.clone() }
     }
 }
 
-impl<N: NewService<Handle> + 'static> Pool<N> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
     /// Construct a new pool. This returns a future, because it will attempt to
     /// establish the minimum number of connections immediately.
     ///
     /// This takes an address and a protocol for establishing connections, a
     /// handle to an event loop to run those connections on, and a configuration
     /// object to control its policy.
-    pub fn new(client: N, handle: Handle, config: Config)
-        -> Box<Future<Item = Pool<N>, Error = io::Error>>
+    pub fn new(client: C, handle: Handle, config: Config)
+        -> Box<Future<Item = Pool<K, C>, Error = io::Error>>
     {
         // The connector type will be used for setting up the initial connections
-        struct Connector<N> {
-            client: N,
+        struct Connector<C> {
+            client: C,
             handle: Handle,
         }
 
         // The connect function
-        fn connect<N: NewService<Handle>>(c: &Connector<N>) -> N::Future {
-            c.client.new_service(&c.handle)
+        fn connect<K: 'static, C: Connect<K, Handle>>(c: &Connector<C>) -> C::Future {
+            c.client.connect(&c.handle)
         }
 
         let connector = Connector {
@@ -141,7 +141,7 @@ impl<N: NewService<Handle> + 'static> Pool<N> {
     /// During storage, the connection may be released according to your configuration.
     /// Otherwise, it will prioritize giving the connection to a waiting request and only
     /// if there are none return it to the queue inside the pool.
-    pub fn connection(&self) -> ConnFuture<PooledConn<N>, io::Error> {
+    pub fn connection(&self) -> ConnFuture<PooledConn<K, C>, io::Error> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
             return future::Either::A(future::ok(PooledConn {
