@@ -10,11 +10,11 @@ use core::reactor::{Handle, Timeout, Interval};
 use service::call::Connect;
 
 use config::Config;
-use connections::{ConnQueue, Conn};
+use queue::{Queue, Live};
 
 pub struct InnerPool<K: 'static, C: Connect<K, Handle>> {
-    conns: RefCell<ConnQueue<C::Instance>>,
-    waiting: RefCell<VecDeque<oneshot::Sender<Conn<C::Instance>>>>,
+    conns: RefCell<Queue<C::Instance>>,
+    waiting: RefCell<VecDeque<oneshot::Sender<Live<C::Instance>>>>,
     handle: Handle,
     client: C,
     config: Config,
@@ -22,7 +22,7 @@ pub struct InnerPool<K: 'static, C: Connect<K, Handle>> {
 }
 
 impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Future: 'static {
-    pub fn new(conns: ConnQueue<C::Instance>, handle: Handle, client: C, config: Config) -> InnerPool<K, C> {
+    pub fn new(conns: Queue<C::Instance>, handle: Handle, client: C, config: Config) -> InnerPool<K, C> {
         InnerPool {
             conns: RefCell::new(conns),
             waiting: RefCell::new(VecDeque::new()),
@@ -50,13 +50,13 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Futur
     pub fn replenish_connection(&self, pool: Rc<Self>) {
         let spawn = self.new_connection().map_err(|_| ()).map(move |conn| {
             pool.increment();
-            InnerPool::store(&pool, Conn::new(conn))
+            InnerPool::store(&pool, Live::new(conn))
         });
         self.handle.spawn(spawn);
     }
 
     /// Get a connection from the pool.
-    pub fn get_connection(&self) -> Option<Conn<C::Instance>> {
+    pub fn get_connection(&self) -> Option<Live<C::Instance>> {
         self.conns.borrow_mut().get()
     }
 
@@ -66,7 +66,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Futur
     }
 
     /// Prepare to notify this sender of an available connection.
-    pub fn notify_of_connection(&self, tx: oneshot::Sender<Conn<C::Instance>>) {
+    pub fn notify_of_connection(&self, tx: oneshot::Sender<Live<C::Instance>>) {
         self.waiting.borrow_mut().push_back(tx);
     }
 
@@ -80,7 +80,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Futur
     /// * The connection will be released, if it should be released.
     /// * The connection will be passed to a waiting future, if any exist.
     /// * The connection will be put back into the connection pool.
-    pub fn store(this: &Rc<Self>, conn: Conn<C::Instance>) {
+    pub fn store(this: &Rc<Self>, conn: Live<C::Instance>) {
         // If this connection has been alive too long, release it
         if this.config.max_live_time.map_or(false, |max| conn.live_since.elapsed() <= max) {
             this.conns.borrow_mut().decrement();
@@ -131,7 +131,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Futur
             for waiting in waiting.drain(..).take(max - this.total()) {
                 let pool = this.clone();
                 let spawn = this.new_connection().map_err(|_| ()).map(move |conn| {
-                    let conn = Conn::new(conn);
+                    let conn = Live::new(conn);
                     if let Err(conn) = waiting.send(conn) {
                         InnerPool::store(&pool, conn)
                     }
@@ -143,7 +143,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Futur
             for waiting in waiting.drain(..) {
                 let pool = this.clone();
                 let spawn = this.new_connection().map_err(|_| ()).map(move |conn| {
-                    let conn = Conn::new(conn);
+                    let conn = Live::new(conn);
                     if let Err(conn) = waiting.send(conn) {
                         InnerPool::store(&pool, conn)
                     }

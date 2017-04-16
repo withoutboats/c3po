@@ -5,14 +5,14 @@ use std::time::Instant;
 use config::Config;
 
 /// A connection, carrying with it a record of how long it has been live.
-pub struct Conn<T> {
+pub struct Live<T> {
     pub conn: T,
     pub live_since: Instant,
 }
 
-impl<T> Conn<T> {
-    pub fn new(conn: T) -> Conn<T> {
-        Conn {
+impl<T> Live<T> {
+    pub fn new(conn: T) -> Live<T> {
+        Live {
             conn: conn,
             live_since: Instant::now(),
         }
@@ -21,12 +21,12 @@ impl<T> Conn<T> {
 
 /// An idle connection, carrying with it a record of how long it has been idle.
 struct Idle<T> {
-    conn: Conn<T>,
+    conn: Live<T>,
     idle_since: Instant,
 }
 
 impl<T> Idle<T> {
-    fn new(conn: Conn<T>) -> Idle<T> {
+    fn new(conn: Live<T>) -> Idle<T> {
         Idle {
             conn: conn,
             idle_since: Instant::now(),
@@ -36,15 +36,15 @@ impl<T> Idle<T> {
 
 /// A queue of idle connections which counts how many connections exist total
 /// (including those which are not in the queue.)
-pub struct ConnQueue<C> {
+pub struct Queue<C> {
     idle: VecDeque<Idle<C>>,
     total_count: usize,
 }
 
-impl<C> ConnQueue<C> {
+impl<C> Queue<C> {
     /// Construct an empty queue with a certain capacity
-    pub fn empty(capacity: usize) -> ConnQueue<C> {
-        ConnQueue {
+    pub fn empty(capacity: usize) -> Queue<C> {
+        Queue {
             idle: VecDeque::with_capacity(capacity),
             total_count: 0,
         }
@@ -64,19 +64,19 @@ impl<C> ConnQueue<C> {
 
     /// Push a new connection into the queue (this will increment
     /// the total connection count).
-    pub fn new_conn(&mut self, conn: Conn<C>) {
+    pub fn new_conn(&mut self, conn: Live<C>) {
         self.store(conn);
         self.increment();
     }
 
     /// Store a connection which has already been counted in the queue
     /// (this will NOT increment the total connection count).
-    pub fn store(&mut self, conn: Conn<C>) {
+    pub fn store(&mut self, conn: Live<C>) {
         self.idle.push_back(Idle::new(conn));
     }
 
     /// Get the longest-idle connection from the queue.
-    pub fn get(&mut self) -> Option<Conn<C>> {
+    pub fn get(&mut self) -> Option<Live<C>> {
         self.idle.pop_front().map(|Idle { conn, ..}| conn)
     }
 
@@ -135,29 +135,29 @@ mod tests {
 
     #[test]
     fn new_conn() {
-        let mut conns = ConnQueue::empty(1);
+        let mut conns = Queue::empty(1);
         assert_eq!(conns.idle(), 0);
         assert_eq!(conns.total(), 0);
-        conns.new_conn(Conn::new(()));
+        conns.new_conn(Live::new(()));
         assert_eq!(conns.idle(), 1);
         assert_eq!(conns.total(), 1);
     }
 
     #[test]
     fn store() {
-        let mut conns = ConnQueue::empty(1);
+        let mut conns = Queue::empty(1);
         assert_eq!(conns.idle(), 0);
         assert_eq!(conns.total(), 0);
-        conns.store(Conn::new(()));
+        conns.store(Live::new(()));
         assert_eq!(conns.idle(), 1);
         assert_eq!(conns.total(), 0);
     }
 
     #[test]
     fn get() {
-        let mut conns = ConnQueue::empty(1);
+        let mut conns = Queue::empty(1);
         assert!(conns.get().is_none());
-        conns.new_conn(Conn::new(()));
+        conns.new_conn(Live::new(()));
         assert!(conns.get().is_some());
         assert_eq!(conns.idle(), 0);
         assert_eq!(conns.total(), 1);
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn increment_and_decrement() {
-        let mut conns: ConnQueue<()>= ConnQueue::empty(0);
+        let mut conns: Queue<()>= Queue::empty(0);
         assert_eq!(conns.total(), 0);
         assert_eq!(conns.idle(), 0);
         conns.increment();
@@ -181,10 +181,10 @@ mod tests {
         let max_idle = Duration::new(0, 100_000);
         let config = Config::new(0).max_idle_time(max_idle);
         
-        let mut conns = ConnQueue::empty(2);
-        conns.new_conn(Conn::new(()));
+        let mut conns = Queue::empty(2);
+        conns.new_conn(Live::new(()));
         thread::sleep(max_idle);
-        conns.new_conn(Conn::new((())));
+        conns.new_conn(Live::new((())));
         assert_eq!(conns.total(), 2);
         assert_eq!(conns.idle(), 2);
         conns.reap(&config);
@@ -197,10 +197,10 @@ mod tests {
         let max_live = Duration::new(0, 100_000);
         let config = Config::new(0).max_live_time(max_live);
         
-        let mut conns = ConnQueue::empty(2);
-        conns.new_conn(Conn::new(()));
+        let mut conns = Queue::empty(2);
+        conns.new_conn(Live::new(()));
         thread::sleep(max_live);
-        conns.new_conn(Conn::new((())));
+        conns.new_conn(Live::new((())));
         assert_eq!(conns.total(), 2);
         assert_eq!(conns.idle(), 2);
         conns.reap(&config);

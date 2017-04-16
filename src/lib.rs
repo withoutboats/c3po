@@ -4,7 +4,7 @@ extern crate tokio_proto as proto;
 extern crate tokio_service as service;
 
 mod config;
-mod connections;
+mod queue;
 mod inner;
 
 mod bound_tcp_client;
@@ -22,7 +22,7 @@ use service::call::Connect;
 pub use config::Config;
 pub use bound_tcp_client::BoundTcpClient;
 
-use connections::{ConnQueue, Conn};
+use queue::{Queue, Live};
 use inner::InnerPool;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
@@ -31,24 +31,24 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
-pub struct PooledConn<K: 'static, C: Connect<K, Handle> + 'static> {
-    conn: Option<Conn<C::Instance>>,
+pub struct Conn<K: 'static, C: Connect<K, Handle> + 'static> {
+    conn: Option<Live<C::Instance>>,
     pool: Rc<InnerPool<K, C>>,
 }
-impl<K: 'static, C: Connect<K, Handle> + 'static> Deref for PooledConn<K, C> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> Deref for Conn<K, C> {
     type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> DerefMut for PooledConn<K, C> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> DerefMut for Conn<K, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> Drop for PooledConn<K, C> {
+impl<K: 'static, C: Connect<K, Handle> + 'static> Drop for Conn<K, C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         InnerPool::store(&self.pool, conn)
@@ -106,10 +106,10 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
                                                     .take(config.min_connections)
                                                     .map(connect));
 
-        // Fold the connections we are creating into a ConnQueue object
+        // Fold the connections we are creating into a Queue object
         let count = config.max_connections.unwrap_or(config.min_connections);
-        let conns = conns.fold::<_, _, io::Result<_>>(ConnQueue::empty(count), |mut conns, conn| {
-            conns.new_conn(Conn::new(conn));
+        let conns = conns.fold::<_, _, io::Result<_>>(Queue::empty(count), |mut conns, conn| {
+            conns.new_conn(Live::new(conn));
             Ok(conns)
         });
         
@@ -141,10 +141,10 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
     /// During storage, the connection may be released according to your configuration.
     /// Otherwise, it will prioritize giving the connection to a waiting request and only
     /// if there are none return it to the queue inside the pool.
-    pub fn connection(&self) -> ConnFuture<PooledConn<K, C>, io::Error> {
+    pub fn connection(&self) -> ConnFuture<Conn<K, C>, io::Error> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
-            return future::Either::A(future::ok(PooledConn {
+            return future::Either::A(future::ok(Conn {
                 conn: Some(conn),
                 pool: self.inner.clone(),
             }))
@@ -182,14 +182,14 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
                     let timeout = timeout.then(|_| future::err(ConnectError));
                     let rx = rx.map_err(|_| ConnectError).select(timeout);
                     return future::Either::B(Box::new(rx.map(|(conn, _)| {
-                        PooledConn {
+                        Conn {
                             conn: Some(conn),
                             pool: pool,
                         }
                     }).map_err(|(err, _)| io::Error::new(io::ErrorKind::TimedOut, err))))
                 } else {
                     return future::Either::B(Box::new(rx.map(|conn| {
-                        PooledConn {
+                        Conn {
                             conn: Some(conn),
                             pool: pool,
                         }
@@ -207,8 +207,8 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
         let pool = self.inner.clone();
         future::Either::B(Box::new(self.inner.new_connection().map(|conn| {
             pool.increment();
-            PooledConn {
-                conn: Some(Conn::new(conn)),
+            Conn {
+                conn: Some(Live::new(conn)),
                 pool: pool,
             }
         })))
