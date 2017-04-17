@@ -1,35 +1,32 @@
 use std::collections::VecDeque;
 use std::cell::RefCell;
 use std::io;
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 use futures::{Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::{Handle, Timeout, Interval};
-use service::call::Connect;
+use service::Connect;
 
 use config::Config;
 use queue::{Queue, Live};
 
-pub struct InnerPool<K: 'static, C: Connect<K, Handle>> {
+pub struct InnerPool<C: Connect<Handle>> {
     conns: RefCell<Queue<C::Instance>>,
     waiting: RefCell<VecDeque<oneshot::Sender<Live<C::Instance>>>>,
     handle: Handle,
     client: C,
     config: Config,
-    _spoopy: PhantomData<K>,
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> InnerPool<K, C> where C::Future: 'static {
-    pub fn new(conns: Queue<C::Instance>, handle: Handle, client: C, config: Config) -> InnerPool<K, C> {
+impl<C: Connect<Handle> + 'static> InnerPool<C> where C::Future: 'static {
+    pub fn new(conns: Queue<C::Instance>, handle: Handle, client: C, config: Config) -> InnerPool<C> {
         InnerPool {
             conns: RefCell::new(conns),
             waiting: RefCell::new(VecDeque::new()),
             handle: handle,
             client: client,
             config: config,
-            _spoopy: PhantomData,
         }
     }
 

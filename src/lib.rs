@@ -17,7 +17,7 @@ use std::rc::Rc;
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
-use service::call::Connect;
+use service::Connect;
 
 pub use config::Config;
 pub use bound_tcp_client::BoundTcpClient;
@@ -31,24 +31,24 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
-pub struct Conn<K: 'static, C: Connect<K, Handle> + 'static> {
+pub struct Conn<C: Connect<Handle> + 'static> {
     conn: Option<Live<C::Instance>>,
-    pool: Rc<InnerPool<K, C>>,
+    pool: Rc<InnerPool<C>>,
 }
-impl<K: 'static, C: Connect<K, Handle> + 'static> Deref for Conn<K, C> {
+impl<C: Connect<Handle> + 'static> Deref for Conn<C> {
     type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> DerefMut for Conn<K, C> {
+impl<C: Connect<Handle> + 'static> DerefMut for Conn<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> Drop for Conn<K, C> {
+impl<C: Connect<Handle> + 'static> Drop for Conn<C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         InnerPool::store(&self.pool, conn)
@@ -65,17 +65,17 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Drop for Conn<K, C> {
 /// The first type parameter is the protocol for the clients produced by this pool.
 /// The second parameter is the Kind type, usually found in tokio_proto, which is
 /// used to distinguish pipelined and mutiplexed connections.
-pub struct Pool<K: 'static, C: Connect<K, Handle>> {
-    inner: Rc<InnerPool<K, C>>,
+pub struct Pool<C: Connect<Handle>> {
+    inner: Rc<InnerPool<C>>,
 }
 
-impl<K: 'static, C: Connect<K, Handle>> Clone for Pool<K, C> {
+impl<C: Connect<Handle>> Clone for Pool<C> {
     fn clone(&self) -> Self {
         Pool { inner: self.inner.clone() }
     }
 }
 
-impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
+impl<C: Connect<Handle> + 'static> Pool<C> {
     /// Construct a new pool. This returns a future, because it will attempt to
     /// establish the minimum number of connections immediately.
     ///
@@ -83,7 +83,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
     /// handle to an event loop to run those connections on, and a configuration
     /// object to control its policy.
     pub fn new(client: C, handle: Handle, config: Config)
-        -> Box<Future<Item = Pool<K, C>, Error = io::Error>>
+        -> Box<Future<Item = Pool<C>, Error = io::Error>>
     {
         // The connector type will be used for setting up the initial connections
         struct Connector<C> {
@@ -92,7 +92,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
         }
 
         // The connect function
-        fn connect<K: 'static, C: Connect<K, Handle>>(c: &Connector<C>) -> C::Future {
+        fn connect<C: Connect<Handle>>(c: &Connector<C>) -> C::Future {
             c.client.connect(&c.handle)
         }
 
@@ -141,7 +141,7 @@ impl<K: 'static, C: Connect<K, Handle> + 'static> Pool<K, C> {
     /// During storage, the connection may be released according to your configuration.
     /// Otherwise, it will prioritize giving the connection to a waiting request and only
     /// if there are none return it to the queue inside the pool.
-    pub fn connection(&self) -> ConnFuture<Conn<K, C>, io::Error> {
+    pub fn connection(&self) -> ConnFuture<Conn<C>, io::Error> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
             return future::Either::A(future::ok(Conn {

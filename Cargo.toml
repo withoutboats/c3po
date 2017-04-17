@@ -12,4 +12,4 @@ tokio-proto = "0.1.1"
 
 [dependencies.tokio-service]
 git = "https://github.com/withoutboats/tokio-service"
-branch = "new-service-changes"
+branch = "streams-as-subsets"
