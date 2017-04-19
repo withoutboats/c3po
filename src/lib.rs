@@ -1,13 +1,10 @@
 extern crate futures;
 extern crate tokio_core as core;
-extern crate tokio_proto as proto;
 extern crate tokio_service as service;
 
 mod config;
 mod queue;
 mod inner;
-
-mod bound_tcp_client;
 
 use std::io;
 use std::iter;
@@ -17,10 +14,9 @@ use std::rc::Rc;
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
-use service::Connect;
+use service::NewService;
 
 pub use config::Config;
-pub use bound_tcp_client::BoundTcpClient;
 
 use queue::{Queue, Live};
 use inner::InnerPool;
@@ -31,24 +27,24 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
-pub struct Conn<C: Connect<Handle> + 'static> {
+pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
     pool: Rc<InnerPool<C>>,
 }
-impl<C: Connect<Handle> + 'static> Deref for Conn<C> {
+impl<C: NewService + 'static> Deref for Conn<C> {
     type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<C: Connect<Handle> + 'static> DerefMut for Conn<C> {
+impl<C: NewService + 'static> DerefMut for Conn<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<C: Connect<Handle> + 'static> Drop for Conn<C> {
+impl<C: NewService + 'static> Drop for Conn<C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         InnerPool::store(&self.pool, conn)
@@ -65,17 +61,17 @@ impl<C: Connect<Handle> + 'static> Drop for Conn<C> {
 /// The first type parameter is the protocol for the clients produced by this pool.
 /// The second parameter is the Kind type, usually found in tokio_proto, which is
 /// used to distinguish pipelined and mutiplexed connections.
-pub struct Pool<C: Connect<Handle>> {
+pub struct Pool<C: NewService> {
     inner: Rc<InnerPool<C>>,
 }
 
-impl<C: Connect<Handle>> Clone for Pool<C> {
+impl<C: NewService> Clone for Pool<C> {
     fn clone(&self) -> Self {
         Pool { inner: self.inner.clone() }
     }
 }
 
-impl<C: Connect<Handle> + 'static> Pool<C> {
+impl<C: NewService + 'static> Pool<C> {
     /// Construct a new pool. This returns a future, because it will attempt to
     /// establish the minimum number of connections immediately.
     ///
@@ -85,26 +81,11 @@ impl<C: Connect<Handle> + 'static> Pool<C> {
     pub fn new(client: C, handle: Handle, config: Config)
         -> Box<Future<Item = Pool<C>, Error = io::Error>>
     {
-        // The connector type will be used for setting up the initial connections
-        struct Connector<C> {
-            client: C,
-            handle: Handle,
-        }
-
-        // The connect function
-        fn connect<C: Connect<Handle>>(c: &Connector<C>) -> C::Future {
-            c.client.connect(&c.handle)
-        }
-
-        let connector = Connector {
-            client: client,
-            handle: handle,
-        };
 
         // Establish the minimum number of connections (in an unordered stream)
-        let conns = stream::futures_unordered(iter::repeat(&connector)
+        let conns = stream::futures_unordered(iter::repeat(&client)
                                                     .take(config.min_connections)
-                                                    .map(connect));
+                                                    .map(|c| c.new_service()));
 
         // Fold the connections we are creating into a Queue object
         let count = config.max_connections.unwrap_or(config.min_connections);
@@ -115,7 +96,6 @@ impl<C: Connect<Handle> + 'static> Pool<C> {
         
         // Set up the pool once the connections are established
         Box::new(conns.and_then(move |conns| {
-            let Connector { client, handle, .. } = connector;
             let pool = Rc::new(InnerPool::new(conns, handle, client, config));
 
             // Prepare a repear task to run (if configured to reap)

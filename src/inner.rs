@@ -6,12 +6,12 @@ use std::rc::Rc;
 use futures::{Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::{Handle, Timeout, Interval};
-use service::Connect;
+use service::NewService;
 
 use config::Config;
 use queue::{Queue, Live};
 
-pub struct InnerPool<C: Connect<Handle>> {
+pub struct InnerPool<C: NewService> {
     conns: RefCell<Queue<C::Instance>>,
     waiting: RefCell<VecDeque<oneshot::Sender<Live<C::Instance>>>>,
     handle: Handle,
@@ -19,7 +19,7 @@ pub struct InnerPool<C: Connect<Handle>> {
     config: Config,
 }
 
-impl<C: Connect<Handle> + 'static> InnerPool<C> where C::Future: 'static {
+impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
     pub fn new(conns: Queue<C::Instance>, handle: Handle, client: C, config: Config) -> InnerPool<C> {
         InnerPool {
             conns: RefCell::new(conns),
@@ -59,7 +59,7 @@ impl<C: Connect<Handle> + 'static> InnerPool<C> where C::Future: 'static {
 
     /// Create and return a new connection.
     pub fn new_connection(&self) -> C::Future {
-        self.client.connect(&self.handle)
+        self.client.new_service()
     }
 
     /// Prepare to notify this sender of an available connection.
