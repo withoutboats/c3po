@@ -121,7 +121,7 @@ impl<C: NewService + 'static> Pool<C> {
     /// During storage, the connection may be released according to your configuration.
     /// Otherwise, it will prioritize giving the connection to a waiting request and only
     /// if there are none return it to the queue inside the pool.
-    pub fn connection(&self) -> ConnFuture<Conn<C>, io::Error> {
+    pub fn connection<E: From<io::Error>>(&self) -> ConnFuture<Conn<C>, E> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
             return future::Either::A(future::ok(Conn {
@@ -166,14 +166,14 @@ impl<C: NewService + 'static> Pool<C> {
                             conn: Some(conn),
                             pool: pool,
                         }
-                    }).map_err(|(err, _)| io::Error::new(io::ErrorKind::TimedOut, err))))
+                    }).map_err(|(err, _)| E::from(io::Error::new(io::ErrorKind::TimedOut, err)))))
                 } else {
                     return future::Either::B(Box::new(rx.map(|conn| {
                         Conn {
                             conn: Some(conn),
                             pool: pool,
                         }
-                    }).map_err(|_| io::Error::new(io::ErrorKind::TimedOut, ConnectError))))
+                    }).map_err(|_| E::from(io::Error::new(io::ErrorKind::TimedOut, ConnectError)))))
                 }
             }
         } 
@@ -191,6 +191,6 @@ impl<C: NewService + 'static> Pool<C> {
                 conn: Some(Live::new(conn)),
                 pool: pool,
             }
-        })))
+        }).map_err(|e| E::from(e))))
     }
 }
