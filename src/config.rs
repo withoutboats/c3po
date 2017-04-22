@@ -28,6 +28,21 @@ impl Config {
 
 }
 
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            min_connections: 10,
+            max_connections: Some(10),
+            min_idle_connections: None,
+            max_idle_connections: None,
+            connect_timeout: Some(Duration::from_secs(30)),
+            max_live_time: Some(Duration::from_secs(30 * 60)),
+            max_idle_time: Some(Duration::from_secs(10 * 60)),
+            reap_frequency: Some(Duration::from_secs(30)),
+        }
+    }
+}
+
 macro_rules! config {
     ($($flag:ident: $t:ty),*) => (
         impl Config {
