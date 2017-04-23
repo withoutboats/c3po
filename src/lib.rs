@@ -2,6 +2,8 @@ extern crate futures;
 extern crate tokio_core as core;
 extern crate tokio_service as service;
 
+#[macro_use] extern crate serde_derive;
+
 mod config;
 mod queue;
 mod inner;
