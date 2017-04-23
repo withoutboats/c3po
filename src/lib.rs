@@ -124,73 +124,54 @@ impl<C: NewService + 'static> Pool<C> {
     pub fn connection<E: From<io::Error>>(&self) -> ConnFuture<Conn<C>, E> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
-            return future::Either::A(future::ok(Conn {
+            future::Either::A(future::ok(Conn {
                 conn: Some(conn),
                 pool: self.inner.clone(),
             }))
-        }
-        
-        // If there is a maximum number of connections and we've met it, we need to wait
-        // for a connection to free up
-        if let Some(max) = self.inner.max_conns() {
-            if self.inner.total() >= max {
-                // Enum for connecting: either cancelled or timed out
-                use std::{fmt, error};
+        } else {
+            // Otherwise, we need to wait for a connection to free up.
 
-                #[derive(Debug)]
-                struct ConnectError;
+            // Error to indicate connection failure.
+            #[derive(Debug)]
+            struct ConnectError;
 
-                impl error::Error for ConnectError {
-                    fn description(&self) -> &'static str { "Connection attempt timed out" }
+            use std::{fmt, error};
+
+            impl error::Error for ConnectError {
+                fn description(&self) -> &'static str { "Connection attempt timed out" }
+            }
+
+            impl fmt::Display for ConnectError {
+                fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+                    write!(f, "Connection attempt timed out")
                 }
+            }
 
-                impl fmt::Display for ConnectError {
-                    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-                        write!(f, "Connection attempt timed out")
+            //Have the pool notify us of the connection
+            let (tx, rx) = oneshot::channel();
+            self.inner.notify_of_connection(tx);
+
+            // Prepare the future which will wait for a free connection (may or may not
+            // have a timeout)
+            let pool = self.inner.clone();
+            if let Some(Ok(timeout)) = self.inner.connection_timeout() {
+
+                let timeout = timeout.then(|_| future::err(ConnectError));
+                let rx = rx.map_err(|_| ConnectError).select(timeout);
+                future::Either::B(Box::new(rx.map(|(conn, _)| {
+                    Conn {
+                        conn: Some(conn),
+                        pool: pool,
                     }
-                }
-
-                //Have the pool notify us of the connection
-                let (tx, rx) = oneshot::channel();
-                self.inner.notify_of_connection(tx);
-
-                // Prepare the future which will wait for a free connection (may or may not
-                // have a timeout)
-                let pool = self.inner.clone();
-                if let Some(Ok(timeout)) = self.inner.connection_timeout() {
-
-                    let timeout = timeout.then(|_| future::err(ConnectError));
-                    let rx = rx.map_err(|_| ConnectError).select(timeout);
-                    return future::Either::B(Box::new(rx.map(|(conn, _)| {
-                        Conn {
-                            conn: Some(conn),
-                            pool: pool,
-                        }
-                    }).map_err(|(err, _)| E::from(io::Error::new(io::ErrorKind::TimedOut, err)))))
-                } else {
-                    return future::Either::B(Box::new(rx.map(|conn| {
-                        Conn {
-                            conn: Some(conn),
-                            pool: pool,
-                        }
-                    }).map_err(|_| E::from(io::Error::new(io::ErrorKind::TimedOut, ConnectError)))))
-                }
+                }).map_err(|(err, _)| E::from(io::Error::new(io::ErrorKind::TimedOut, err)))))
+            } else {
+                future::Either::B(Box::new(rx.map(|conn| {
+                    Conn {
+                        conn: Some(conn),
+                        pool: pool,
+                    }
+                }).map_err(|_| E::from(io::Error::new(io::ErrorKind::TimedOut, ConnectError)))))
             }
         } 
-
-        // TODO - Is this the best choice? Maybe we should wait for a new connection to
-        // free up (on the belief that that will happen sooner) and only create new
-        // connections if, during the reap & replenish step,  there are requests waiting for
-        // connections.
-        //
-        // If we haven't maxed out the pool just create a new connection
-        let pool = self.inner.clone();
-        future::Either::B(Box::new(self.inner.new_connection().map(|conn| {
-            pool.increment();
-            Conn {
-                conn: Some(Live::new(conn)),
-                pool: pool,
-            }
-        }).map_err(|e| E::from(e))))
     }
 }
