@@ -32,14 +32,12 @@ impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
 
     /// Prepare the reap job to run on the event loop.
     pub fn prepare_reaper(this: &Rc<Self>) -> Result<(), io::Error> {
-        if let Some(freq) = this.config.reap_frequency {
-            let pool = this.clone();
-            let reaper = Interval::new(freq, &pool.handle)?.for_each(move |_| {
-                InnerPool::reap_and_replenish(&pool);
-                Ok(())
-            }).map_err(|_| ());
-            this.handle.spawn(reaper);
-        }
+        let pool = this.clone();
+        let reaper = Interval::new(this.config.reap_frequency, &pool.handle)?.for_each(move |_| {
+            InnerPool::reap_and_replenish(&pool);
+            Ok(())
+        }).map_err(|_| ());
+        this.handle.spawn(reaper);
         Ok(())
     }
 
