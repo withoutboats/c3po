@@ -77,11 +77,12 @@ impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
     /// * The connection will be put back into the connection pool.
     pub fn store(this: &Rc<Self>, conn: Live<C::Instance>) {
         // If this connection has been alive too long, release it
-        if this.config.max_live_time.map_or(false, |max| conn.live_since.elapsed() <= max) {
-            this.conns.borrow_mut().decrement();
+        if this.config.max_live_time.map_or(false, |max| conn.live_since.elapsed() >= max) {
             // Create a new connection if we've fallen below the minimum count
-            if this.conns.borrow().total() < this.config.min_connections {
+            if this.conns.borrow().total() - 1 < this.config.min_connections {
                 this.replenish_connection(this.clone());
+            } else {
+                this.conns.borrow_mut().decrement();
             }
         } else {
             // Otherwise, first attempt to send it to any waiting requests
@@ -94,7 +95,7 @@ impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
             }
             // If there are no waiting requests & we aren't over the max idle
             // connections limit, attempt to store it back in the pool
-            if this.config.max_idle_connections.map_or(false, |max| max <= this.conns.borrow().idle()) {
+            if this.config.max_idle_connections.map_or(true, |max| max >= this.conns.borrow().idle()) {
                 this.conns.borrow_mut().store(conn);
             }
         }
@@ -106,9 +107,12 @@ impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
     }
 
     pub fn reap_and_replenish(this: &Rc<Self>) {
-        debug_assert!(this.total() >= this.idle());
-        debug_assert!(this.max_conns().map_or(true, |max| this.total() <= max));
-        debug_assert!(this.total() >= this.min_conns());
+        debug_assert!(this.total() >= this.idle(),
+            "total ({}) < idle ({})", this.total(), this.idle());
+        debug_assert!(this.max_conns().map_or(true, |max| this.total() <= max),
+            "total ({}) > max_conns ({})", this.total(), this.max_conns().unwrap());
+        debug_assert!(this.total() >= this.min_conns(),
+            "total ({}) < min_conns ({})", this.total(), this.min_conns());
         this.reap();
         InnerPool::replenish(this);
     }
