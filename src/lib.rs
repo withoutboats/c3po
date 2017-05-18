@@ -31,8 +31,23 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 /// when it is dropped.
 pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
-    pool: Rc<InnerPool<C>>,
+    // In a normal case this is always Some, but it can be none if constructed from the
+    // new_unpooled constructor.
+    pool: Option<Rc<InnerPool<C>>>,
 }
+
+impl<C: NewService + 'static> Conn<C> {
+    /// This constructor creates a connection which is not stored in a thread pool. It can be
+    /// be useful for purposes in which you need to treat a non-pooled connection as if it were
+    /// stored in a pool, such as during tests.
+    pub fn new_unpooled(instance: C::Instance) -> Self {
+        Conn {
+            conn: Some(Live::new(instance)),
+            pool: None,
+        }
+    }
+}
+
 impl<C: NewService + 'static> Deref for Conn<C> {
     type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
@@ -49,7 +64,7 @@ impl<C: NewService + 'static> DerefMut for Conn<C> {
 impl<C: NewService + 'static> Drop for Conn<C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
-        InnerPool::store(&self.pool, conn)
+        self.pool.as_ref().map(|pool| InnerPool::store(pool, conn));
     }
 }
 
@@ -128,7 +143,7 @@ impl<C: NewService + 'static> Pool<C> {
         if let Some(conn) = self.inner.get_connection() {
             future::Either::A(future::ok(Conn {
                 conn: Some(conn),
-                pool: self.inner.clone(),
+                pool: Some(self.inner.clone()),
             }))
         } else {
             // Otherwise, we need to wait for a connection to free up.
@@ -163,14 +178,14 @@ impl<C: NewService + 'static> Pool<C> {
                 future::Either::B(Box::new(rx.map(|(conn, _)| {
                     Conn {
                         conn: Some(conn),
-                        pool: pool,
+                        pool: Some(pool),
                     }
                 }).map_err(|(err, _)| E::from(io::Error::new(io::ErrorKind::TimedOut, err)))))
             } else {
                 future::Either::B(Box::new(rx.map(|conn| {
                     Conn {
                         conn: Some(conn),
-                        pool: pool,
+                        pool: Some(pool),
                     }
                 }).map_err(|_| E::from(io::Error::new(io::ErrorKind::TimedOut, ConnectError)))))
             }
