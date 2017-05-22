@@ -1,3 +1,7 @@
+//! c3po is a single-threaded, asynchronous connection pool library, intended
+//! for use with tokio.
+#![deny(missing_docs)]
+
 extern crate futures;
 extern crate tokio_core as core;
 extern crate tokio_service as service;
@@ -29,6 +33,9 @@ pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Futur
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
+///
+/// This can be dereferences to the `Service` instance this pool manages, and
+/// also implements `Service` itself by delegating.
 pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
     // In a normal case this is always Some, but it can be none if constructed from the
@@ -37,9 +44,10 @@ pub struct Conn<C: NewService + 'static> {
 }
 
 impl<C: NewService + 'static> Conn<C> {
-    /// This constructor creates a connection which is not stored in a thread pool. It can be
-    /// be useful for purposes in which you need to treat a non-pooled connection as if it were
-    /// stored in a pool, such as during tests.
+    /// This constructor creates a connection which is not stored in a thread
+    /// pool. It can be useful for purposes in which you need to treat a
+    /// non-pooled connection as if it were stored in a pool, such as during
+    /// tests.
     pub fn new_unpooled(instance: C::Instance) -> Self {
         Conn {
             conn: Some(Live::new(instance)),
@@ -81,14 +89,10 @@ impl<C: NewService + 'static> Drop for Conn<C> {
 
 /// An asynchronous, single-threaded connection pool.
 ///
-/// This pool stores connections for re-use according to the policies set by the
-/// `Config` type. It uses an asynchronous tokio event loop, and performs the
-/// connections asynchronously. It can take any type of connection which implements
-/// a tokio  protocol.
-///
-/// The first type parameter is the protocol for the clients produced by this pool.
-/// The second parameter is the Kind type, usually found in tokio_proto, which is
-/// used to distinguish pipelined and mutiplexed connections.
+/// This pool stores connections for re-use according to the policies set by
+/// the `Config` type. It uses an asynchronous tokio event loop, and performs
+/// the connections asynchronously. It can manage any type which implements
+/// `NewService`.
 pub struct Pool<C: NewService> {
     inner: Rc<InnerPool<C>>,
 }
@@ -104,8 +108,8 @@ impl<C: NewService + 'static> Pool<C> {
     /// establish the minimum number of connections immediately.
     ///
     /// This takes an address and a protocol for establishing connections, a
-    /// handle to an event loop to run those connections on, and a configuration
-    /// object to control its policy.
+    /// handle to an event loop to run those connections on, and a
+    /// configuration object to control its policy.
     pub fn new(client: C, handle: Handle, config: Config)
         -> Box<Future<Item = Pool<C>, Error = io::Error>>
     {
@@ -138,17 +142,15 @@ impl<C: NewService + 'static> Pool<C> {
     /// In the happy path, this future will evaluate immediately and perform no
     /// allocations - it just pulls an idle connection out of the pool.
     ///
-    /// In the less happy path, depending on the state of the pool and your
-    /// configurations, it may do one of several things:
+    /// In the less happy path, this will wait for a connection to free up in
+    /// the pool. It is possible that this will time out, depending on your
+    /// configuration.
     ///
-    /// * It may attempt to establish a new connection
-    /// * It may wait for a connection to become available and use that one.
-    /// * It may or may not timeout while waiting, depending on your configuration.
-    ///
-    /// Once the connection this future yields is dropped, it will be returned the pool.
-    /// During storage, the connection may be released according to your configuration.
-    /// Otherwise, it will prioritize giving the connection to a waiting request and only
-    /// if there are none return it to the queue inside the pool.
+    /// Once the connection this future yields is dropped, it will be returned
+    /// to the pool. During storage, the connection may be released according
+    /// to your configuration. Otherwise, it will prioritize giving the
+    /// connection to a waiting request and only if there are none return it to
+    /// the queue inside the pool.
     pub fn connection<E: From<io::Error>>(&self) -> ConnFuture<Conn<C>, E> {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
