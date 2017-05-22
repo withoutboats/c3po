@@ -4,6 +4,7 @@ license = "MIT OR Apache-2.0"
 name = "c3po"
 repository = "https://github.com/withoutboats/c3po"
 version = "0.1.0"
+description = "A connection pool for tokio (single-threaded & asynchronous)."
 
 [dependencies]
 futures = "0.1.13"
