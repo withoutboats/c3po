@@ -16,7 +16,7 @@ use std::rc::Rc;
 use futures::{future, stream, Future, Stream};
 use futures::unsync::oneshot;
 use core::reactor::Handle;
-use service::NewService;
+use service::{NewService, Service};
 
 pub use config::Config;
 
@@ -58,6 +58,17 @@ impl<C: NewService + 'static> Deref for Conn<C> {
 impl<C: NewService + 'static> DerefMut for Conn<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
+    }
+}
+
+impl<C: NewService + 'static> Service for Conn<C> {
+    type Request = C::Request;
+    type Response = C::Response;
+    type Error = C::Error;
+    type Future = <C::Instance as Service>::Future;
+
+    fn call(&self, req: Self::Request) -> Self::Future {
+        self.conn.as_ref().unwrap().conn.call(req)
     }
 }
 
