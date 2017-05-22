@@ -2,6 +2,7 @@
 //! for use with tokio.
 #![deny(missing_docs)]
 
+extern crate crossbeam;
 extern crate futures;
 extern crate tokio_core as core;
 extern crate tokio_service as service;
@@ -15,11 +16,11 @@ mod inner;
 use std::io;
 use std::iter;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
+use std::sync::Arc;
 
-use futures::{future, stream, Future, Stream};
-use futures::unsync::oneshot;
-use core::reactor::Handle;
+use futures::{future, stream, Future, Stream, BoxFuture};
+use futures::sync::oneshot;
+use core::reactor::Remote;
 use service::{NewService, Service};
 
 pub use config::Config;
@@ -29,21 +30,30 @@ use inner::InnerPool;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
 /// pulling an idle future out of the pool.
-pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Future<Item = T, Error = E>>>;
+pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, BoxFuture<T, E>>;
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
 ///
 /// This can be dereferences to the `Service` instance this pool manages, and
 /// also implements `Service` itself by delegating.
-pub struct Conn<C: NewService + 'static> {
+pub struct Conn<C>
+where
+    C: NewService + Send + Sync + 'static,
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     conn: Option<Live<C::Instance>>,
     // In a normal case this is always Some, but it can be none if constructed from the
     // new_unpooled constructor.
-    pool: Option<Rc<InnerPool<C>>>,
+    pool: Option<Arc<InnerPool<C>>>,
 }
 
-impl<C: NewService + 'static> Conn<C> {
+impl<C: Send + Sync + NewService + 'static> Conn<C> 
+where
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     /// This constructor creates a connection which is not stored in a thread
     /// pool. It can be useful for purposes in which you need to treat a
     /// non-pooled connection as if it were stored in a pool, such as during
@@ -56,20 +66,32 @@ impl<C: NewService + 'static> Conn<C> {
     }
 }
 
-impl<C: NewService + 'static> Deref for Conn<C> {
+impl<C: Send + Sync + NewService + 'static> Deref for Conn<C>
+where
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     type Target = C::Instance;
     fn deref(&self) -> &Self::Target {
         &self.conn.as_ref().unwrap().conn
     }
 }
 
-impl<C: NewService + 'static> DerefMut for Conn<C> {
+impl<C: Send + Sync + NewService + 'static> DerefMut for Conn<C>
+where
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<C: NewService + 'static> Service for Conn<C> {
+impl<C: Send + Sync + NewService + 'static> Service for Conn<C>
+where
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     type Request = C::Request;
     type Response = C::Response;
     type Error = C::Error;
@@ -80,7 +102,11 @@ impl<C: NewService + 'static> Service for Conn<C> {
     }
 }
 
-impl<C: NewService + 'static> Drop for Conn<C> {
+impl<C: Send + Sync + NewService + 'static> Drop for Conn<C>
+where
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
         self.pool.as_ref().map(|pool| InnerPool::store(pool, conn));
@@ -94,7 +120,7 @@ impl<C: NewService + 'static> Drop for Conn<C> {
 /// the connections asynchronously. It can manage any type which implements
 /// `NewService`.
 pub struct Pool<C: NewService> {
-    inner: Rc<InnerPool<C>>,
+    inner: Arc<InnerPool<C>>,
 }
 
 impl<C: NewService> Clone for Pool<C> {
@@ -103,15 +129,19 @@ impl<C: NewService> Clone for Pool<C> {
     }
 }
 
-impl<C: NewService + 'static> Pool<C> {
+impl<C> Pool<C> 
+where
+    C: NewService + Send + Sync + 'static,
+    C::Instance: Send,
+    C::Future: Send + 'static,
+{
     /// Construct a new pool. This returns a future, because it will attempt to
     /// establish the minimum number of connections immediately.
     ///
     /// This takes an address and a protocol for establishing connections, a
-    /// handle to an event loop to run those connections on, and a
+    /// remote handle to an event loop to run those connections on, and a
     /// configuration object to control its policy.
-    pub fn new(client: C, handle: Handle, config: Config)
-        -> Box<Future<Item = Pool<C>, Error = io::Error>>
+    pub fn new(client: C, remote: Remote, config: Config) -> BoxFuture<Pool<C>, io::Error>
     {
 
         // Establish the minimum number of connections (in an unordered stream)
@@ -120,18 +150,17 @@ impl<C: NewService + 'static> Pool<C> {
                                                     .map(|c| c.new_service()));
 
         // Fold the connections we are creating into a Queue object
-        let count = config.max_connections.unwrap_or(config.min_connections);
-        let conns = conns.fold::<_, _, io::Result<_>>(Queue::empty(count), |mut conns, conn| {
+        let conns = conns.fold::<_, _, io::Result<_>>(Queue::new(), |conns, conn| {
             conns.new_conn(Live::new(conn));
             Ok(conns)
         });
         
         // Set up the pool once the connections are established
         Box::new(conns.and_then(move |conns| {
-            let pool = Rc::new(InnerPool::new(conns, handle, client, config));
+            let pool = Arc::new(InnerPool::new(conns, remote, client, config));
 
             // Prepare a repear task to run (if configured to reap)
-            InnerPool::prepare_reaper(&pool)?;
+            InnerPool::prepare_reaper(&pool);
 
             Ok(Pool { inner: pool })
         }))
@@ -184,16 +213,14 @@ impl<C: NewService + 'static> Pool<C> {
             // Prepare the future which will wait for a free connection (may or may not
             // have a timeout)
             let pool = self.inner.clone();
-            if let Some(Ok(timeout)) = self.inner.connection_timeout() {
-
-                let timeout = timeout.then(|_| future::err(ConnectError));
-                let rx = rx.map_err(|_| ConnectError).select(timeout);
+            if let Some(timeout) = self.inner.connection_timeout() {
+                let rx = rx.map_err(|_| ConnectError).select(timeout.then(|_| Err(ConnectError)));
                 future::Either::B(Box::new(rx.map(|(conn, _)| {
                     Conn {
                         conn: Some(conn),
                         pool: Some(pool),
                     }
-                }).map_err(|(err, _)| E::from(io::Error::new(io::ErrorKind::TimedOut, err)))))
+                }).map_err(|_| E::from(io::Error::new(io::ErrorKind::TimedOut, ConnectError)))))
             } else {
                 future::Either::B(Box::new(rx.map(|conn| {
                     Conn {

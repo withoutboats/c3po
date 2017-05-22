@@ -1,6 +1,7 @@
-use std::collections::VecDeque;
-use std::mem;
 use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crossbeam::sync::SegQueue;
 
 use config::Config;
 
@@ -37,70 +38,76 @@ impl<T> Idle<T> {
 /// A queue of idle connections which counts how many connections exist total
 /// (including those which are not in the queue.)
 pub struct Queue<C> {
-    idle: VecDeque<Idle<C>>,
-    total_count: usize,
+    idle: SegQueue<Idle<C>>,
+    idle_count: AtomicUsize,
+    total_count: AtomicUsize,
 }
 
 impl<C> Queue<C> {
     /// Construct an empty queue with a certain capacity
-    pub fn empty(capacity: usize) -> Queue<C> {
+    pub fn new() -> Queue<C> {
         Queue {
-            idle: VecDeque::with_capacity(capacity),
-            total_count: 0,
+            idle: SegQueue::new(),
+            idle_count: AtomicUsize::new(0),
+            total_count: AtomicUsize::new(0),
         }
     }
 
     /// Count of idle connection in queue
     #[inline(always)]
     pub fn idle(&self) -> usize {
-        self.idle.len()
+        self.idle_count.load(Ordering::SeqCst)
     }
 
     /// Count of total connections active
     #[inline(always)]
     pub fn total(&self) -> usize {
-        self.total_count
+        self.total_count.load(Ordering::SeqCst)
     }
 
     /// Push a new connection into the queue (this will increment
     /// the total connection count).
-    pub fn new_conn(&mut self, conn: Live<C>) {
+    pub fn new_conn(&self, conn: Live<C>) {
         self.store(conn);
         self.increment();
     }
 
     /// Store a connection which has already been counted in the queue
     /// (this will NOT increment the total connection count).
-    pub fn store(&mut self, conn: Live<C>) {
-        self.idle.push_back(Idle::new(conn));
+    pub fn store(&self, conn: Live<C>) {
+        self.idle_count.fetch_add(1, Ordering::SeqCst);
+        self.idle.push(Idle::new(conn));
     }
 
     /// Get the longest-idle connection from the queue.
-    pub fn get(&mut self) -> Option<Live<C>> {
-        self.idle.pop_front().map(|Idle { conn, ..}| conn)
+    pub fn get(&self) -> Option<Live<C>> {
+        self.idle.try_pop().map(|Idle { conn, ..}| {
+            self.idle_count.fetch_sub(1, Ordering::SeqCst);
+            conn
+        })
     }
 
     /// Increment the connection count without pushing a connection into the
     /// queue.
     #[inline(always)]
-    pub fn increment(&mut self) {
-        self.total_count += 1;
+    pub fn increment(&self) {
+        self.total_count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Decrement the connection count
     #[inline(always)]
-    pub fn decrement(&mut self) {
-        self.total_count -= 1;
+    pub fn decrement(&self) {
+        self.total_count.fetch_sub(1, Ordering::SeqCst);
+        self.idle_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Reap connections from the queue. This will reap connections which have
     /// been alive or idle longer than the configuration's max_live_time and
     /// max_idle_time.
-    pub fn reap(&mut self, config: &Config) {
+    pub fn reap(&self, config: &Config) {
         if config.max_idle_time.is_some() || config.max_live_time.is_some() {
-            let new = VecDeque::with_capacity(self.idle());
-            let conns = mem::replace(&mut self.idle, new);
-            for conn in conns {
+            let mut ctr = self.idle();
+            while let Some(conn) = self.idle.try_pop() {
                 let mut keep = true;
 
                 if let Some(max) = config.max_idle_time {
@@ -116,9 +123,14 @@ impl<C> Queue<C> {
                 }
 
                 if keep {
-                    self.idle.push_back(conn);
+                    self.idle.push(conn);
                 } else {
                     self.decrement();
+                }
+
+                ctr -= 1;
+                if ctr == 0 {
+                    break
                 }
             }
         }
