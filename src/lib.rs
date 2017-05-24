@@ -12,6 +12,7 @@ extern crate tokio_service as service;
 mod config;
 mod queue;
 mod inner;
+mod send_wrapper;
 
 use std::io;
 use std::iter;
@@ -27,6 +28,7 @@ pub use config::Config;
 
 use queue::{Queue, Live};
 use inner::InnerPool;
+use send_wrapper::PoolSendWrapper;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
 /// pulling an idle future out of the pool.
@@ -41,13 +43,9 @@ pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
     // In a normal case this is always Some, but it can be none if constructed from the
     // new_unpooled constructor.
-    pool: Option<UnsafeSendWrapper<C>>,
+    pool: Option<PoolSendWrapper<C>>,
 }
 
-struct UnsafeSendWrapper<C: NewService + 'static>(Arc<InnerPool<C>>);
-
-unsafe impl<C: NewService + 'static> Send for UnsafeSendWrapper<C>
-where C::Instance: Send { }
 
 impl<C: NewService + 'static> Conn<C> {
     /// This constructor creates a connection which is not stored in a thread
@@ -89,7 +87,7 @@ impl<C: NewService + 'static> Service for Conn<C> {
 impl<C: NewService + 'static> Drop for Conn<C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
-        self.pool.as_ref().map(|pool| InnerPool::store(&pool.0, conn));
+        self.pool.as_ref().map(|pool| pool.store(conn));
     }
 }
 
@@ -163,7 +161,7 @@ impl<C: NewService + 'static> Pool<C> {
         if let Some(conn) = self.inner.get_connection() {
             future::Either::A(future::ok(Conn {
                 conn: Some(conn),
-                pool: Some(UnsafeSendWrapper(self.inner.clone())),
+                pool: Some(PoolSendWrapper::new(self.inner.clone())),
             }))
         } else {
             // Otherwise, we need to wait for a connection to free up.
@@ -190,7 +188,7 @@ impl<C: NewService + 'static> Pool<C> {
 
             // Prepare the future which will wait for a free connection (may or may not
             // have a timeout)
-            let pool = UnsafeSendWrapper(self.inner.clone());
+            let pool = PoolSendWrapper::new(self.inner.clone());
             if let Some(Ok(timeout)) = self.inner.connection_timeout() {
 
                 let timeout = timeout.then(|_| future::err(ConnectError));
