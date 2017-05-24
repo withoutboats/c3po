@@ -2,6 +2,7 @@
 //! for use with tokio.
 #![deny(missing_docs)]
 
+extern crate crossbeam;
 extern crate futures;
 extern crate tokio_core as core;
 extern crate tokio_service as service;
@@ -15,10 +16,10 @@ mod inner;
 use std::io;
 use std::iter;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use futures::{future, stream, Future, Stream};
-use futures::unsync::oneshot;
+use futures::sync::oneshot;
 use core::reactor::Handle;
 use service::{NewService, Service};
 
@@ -40,8 +41,11 @@ pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
     // In a normal case this is always Some, but it can be none if constructed from the
     // new_unpooled constructor.
-    pool: Option<Rc<InnerPool<C>>>,
+    pool: Option<Arc<InnerPool<C>>>,
 }
+
+unsafe impl<C: NewService + 'static> Send for Conn<C>
+where C::Instance: Send { }
 
 impl<C: NewService + 'static> Conn<C> {
     /// This constructor creates a connection which is not stored in a thread
@@ -94,7 +98,7 @@ impl<C: NewService + 'static> Drop for Conn<C> {
 /// the connections asynchronously. It can manage any type which implements
 /// `NewService`.
 pub struct Pool<C: NewService> {
-    inner: Rc<InnerPool<C>>,
+    inner: Arc<InnerPool<C>>,
 }
 
 impl<C: NewService> Clone for Pool<C> {
@@ -120,15 +124,14 @@ impl<C: NewService + 'static> Pool<C> {
                                                     .map(|c| c.new_service()));
 
         // Fold the connections we are creating into a Queue object
-        let count = config.max_connections.unwrap_or(config.min_connections);
-        let conns = conns.fold::<_, _, io::Result<_>>(Queue::empty(count), |mut conns, conn| {
+        let conns = conns.fold::<_, _, io::Result<_>>(Queue::new(), |conns, conn| {
             conns.new_conn(Live::new(conn));
             Ok(conns)
         });
         
         // Set up the pool once the connections are established
         Box::new(conns.and_then(move |conns| {
-            let pool = Rc::new(InnerPool::new(conns, handle, client, config));
+            let pool = Arc::new(InnerPool::new(conns, handle, client, config));
 
             // Prepare a repear task to run (if configured to reap)
             InnerPool::prepare_reaper(&pool)?;
