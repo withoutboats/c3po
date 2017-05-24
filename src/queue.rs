@@ -98,7 +98,6 @@ impl<C> Queue<C> {
     #[inline(always)]
     pub fn decrement(&self) {
         self.total_count.fetch_sub(1, Ordering::SeqCst);
-        self.idle_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Reap connections from the queue. This will reap connections which have
@@ -126,6 +125,7 @@ impl<C> Queue<C> {
                     self.idle.push(conn);
                 } else {
                     self.decrement();
+                    self.idle_count.fetch_sub(1, Ordering::SeqCst);
                 }
 
                 ctr -= 1;

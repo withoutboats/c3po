@@ -93,11 +93,21 @@ impl<C: NewService + 'static> InnerPool<C> where C::Future: 'static {
             };
         }
 
-        // If there are no waiting requests & we aren't over the max idle
-        // connections limit, attempt to store it back in the pool
-        if this.config.max_idle_connections.map_or(true, |max| max >= this.conns.idle()) {
-            this.conns.store(conn);
+        // If there are no waiting connections, kill this connection or store
+        // it.
+
+        // Check if we are over the max idle connections limit
+        if this.config.max_idle_connections.map_or(false, |max| max < this.conns.idle()) {
+            return this.conns.decrement();
         }
+
+        // Check if this connection has been alive too long
+        if this.config.max_live_time.map_or(false, |max| max < conn.live_since.elapsed()) {
+            return this.conns.decrement();
+        }
+
+        // Otherwise, store it.
+        this.conns.store(conn);
     }
 
     /// Increment the connection count.

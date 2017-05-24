@@ -18,7 +18,7 @@ use std::iter;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use futures::{future, stream, Future, Stream};
+use futures::{future, stream, Future, Stream, BoxFuture};
 use futures::sync::oneshot;
 use core::reactor::Handle;
 use service::{NewService, Service};
@@ -30,7 +30,7 @@ use inner::InnerPool;
 
 /// Future yielded by `Pool::connection`. Optimized not to allocate when
 /// pulling an idle future out of the pool.
-pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, Box<Future<Item = T, Error = E>>>;
+pub type ConnFuture<T, E> = future::Either<future::FutureResult<T, E>, BoxFuture<T, E>>;
 
 /// A smart wrapper around a connection which stores it back in the pool
 /// when it is dropped.
@@ -41,10 +41,12 @@ pub struct Conn<C: NewService + 'static> {
     conn: Option<Live<C::Instance>>,
     // In a normal case this is always Some, but it can be none if constructed from the
     // new_unpooled constructor.
-    pool: Option<Arc<InnerPool<C>>>,
+    pool: Option<UnsafeSendWrapper<C>>,
 }
 
-unsafe impl<C: NewService + 'static> Send for Conn<C>
+struct UnsafeSendWrapper<C: NewService + 'static>(Arc<InnerPool<C>>);
+
+unsafe impl<C: NewService + 'static> Send for UnsafeSendWrapper<C>
 where C::Instance: Send { }
 
 impl<C: NewService + 'static> Conn<C> {
@@ -87,7 +89,7 @@ impl<C: NewService + 'static> Service for Conn<C> {
 impl<C: NewService + 'static> Drop for Conn<C> {
     fn drop(&mut self) {
         let conn = self.conn.take().unwrap();
-        self.pool.as_ref().map(|pool| InnerPool::store(pool, conn));
+        self.pool.as_ref().map(|pool| InnerPool::store(&pool.0, conn));
     }
 }
 
@@ -154,12 +156,14 @@ impl<C: NewService + 'static> Pool<C> {
     /// to your configuration. Otherwise, it will prioritize giving the
     /// connection to a waiting request and only if there are none return it to
     /// the queue inside the pool.
-    pub fn connection<E: From<io::Error>>(&self) -> ConnFuture<Conn<C>, E> {
+    pub fn connection<E: From<io::Error>>(&self) -> ConnFuture<Conn<C>, E>
+        where C::Instance: Send, C::Future: Send,
+    {
         // If an idle connection is available in the case, return immediately (happy path)
         if let Some(conn) = self.inner.get_connection() {
             future::Either::A(future::ok(Conn {
                 conn: Some(conn),
-                pool: Some(self.inner.clone()),
+                pool: Some(UnsafeSendWrapper(self.inner.clone())),
             }))
         } else {
             // Otherwise, we need to wait for a connection to free up.
@@ -186,7 +190,7 @@ impl<C: NewService + 'static> Pool<C> {
 
             // Prepare the future which will wait for a free connection (may or may not
             // have a timeout)
-            let pool = self.inner.clone();
+            let pool = UnsafeSendWrapper(self.inner.clone());
             if let Some(Ok(timeout)) = self.inner.connection_timeout() {
 
                 let timeout = timeout.then(|_| future::err(ConnectError));
